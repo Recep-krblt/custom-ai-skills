@@ -1,0 +1,53 @@
+# Secrets, keys, and local environment config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*credentials*.json
+*secret*.json
+*token*.json
+.netrc
+id_rsa*
+id_ed25519*
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Node / Web build artifacts
+node_modules/
+.next/
+.astro/
+coverage/
+
+# AI agent local state, logs & repo maps
+.repo-map.*
+.claude/settings.local.json
+*.log
+tmp/
+scratch/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

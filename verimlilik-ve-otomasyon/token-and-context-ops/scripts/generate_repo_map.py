@@ -15,6 +15,7 @@ import re
 import json
 import fnmatch
 import argparse
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -35,7 +36,8 @@ BINARY_EXTENSIONS = {
 }
 
 CACHE_FILENAME = ".repo-map.cache.json"
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
+SKIP_JSON_SUFFIXES = ('.lock.json', '.cache.json', 'tsconfig.tsbuildinfo')
 
 _SYMBOL_LINE_RE = re.compile(r'\(L(\d+)(?:-L(\d+))?\)$')
 
@@ -590,11 +592,43 @@ def is_ignored(rel_path_str: str, root_path: Path, gitignore_patterns: list) -> 
             return True
     return False
 
+def _find_go_tmpl_end(lines, start_idx):
+    """Find 1-based closing line of a Go {{define}} block tracking nested template blocks."""
+    open_re = re.compile(r'\{\{-?\s*(?:if|range|with|define|block)\b')
+    end_re = re.compile(r'\{\{-?\s*end\b')
+    comment_open = re.compile(r'\{\{-?\s*/\*')
+    comment_close = re.compile(r'\*/\s*-?\}\}')
+    depth = 0
+    in_comment = False
+
+    for i in range(start_idx, len(lines)):
+        line = lines[i]
+        if in_comment:
+            if comment_close.search(line):
+                in_comment = False
+            continue
+        if comment_open.search(line) and not comment_close.search(line):
+            in_comment = True
+            continue
+        # Strip inline Go template comments on the same line
+        cleaned = re.sub(r'\{\{-?\s*/\*.*?\*/\s*-?\}\}', '', line)
+        depth += len(open_re.findall(cleaned))
+        ends = len(end_re.findall(cleaned))
+        if ends:
+            depth -= ends
+            if depth <= 0:
+                return i + 1
+    return None
+
+
 def parse_html_symbols(lines, skip_frontmatter=False):
     symbols = []
-    id_pattern = re.compile(r'id=["\']([a-zA-Z0-9_\-]+)["\']')
+    id_pattern = re.compile(r'\bid=["\']([a-zA-Z0-9_\-]+)["\']')
     tag_pattern = re.compile(r'<(title|header|nav|main|section|article|aside|footer|form|table|template|script|link)\b([^>]*)>', re.IGNORECASE)
+    any_id_tag_pattern = re.compile(r'<([a-zA-Z][a-zA-Z0-9\-]*)\b([^>]*\bid=["\']([a-zA-Z0-9_\-]+)["\'][^>]*)>', re.IGNORECASE)
+    go_define_re = re.compile(r'\{\{-?\s*define\s+["\']([^"\']+)["\']\s*-?\}\}')
     close_script_re = re.compile(r'</script\b[^>]*>', re.IGNORECASE)
+    landmark_tags = {'header', 'nav', 'main', 'section', 'article', 'aside', 'footer', 'form', 'table', 'template', 'script'}
     in_comment = False
 
     n = len(lines)
@@ -612,6 +646,12 @@ def parse_html_symbols(lines, skip_frontmatter=False):
             i += 1
             continue
 
+        for gm in go_define_re.finditer(clean_line):
+            end_line = _find_go_tmpl_end(lines, i)
+            symbols.append(format_symbol(f'define "{gm.group(1)}"', idx, end_line))
+
+        # Track non-script segment on this line for standalone #id scan
+        line_for_ids = clean_line
         pos = 0
         while True:
             m = tag_pattern.search(clean_line, pos)
@@ -644,9 +684,10 @@ def parse_html_symbols(lines, skip_frontmatter=False):
                     end_line = find_html_block_end(lines, i, 'script', start_col=m.start())
                     symbols.append(format_symbol(f'<script{type_suffix}{element_id}>', idx, end_line))
 
-                    # Skip inline <script> body so JS template strings like `<section>` aren't misread as HTML
+                    # Skip inline <script> body so JS template strings aren't misread as HTML
+                    line_for_ids = clean_line[:m.start()]
                     if end_line is None:
-                        return symbols
+                        return sort_symbols_by_line(symbols)
                     if end_line == idx:
                         cm = close_script_re.search(clean_line, pos)
                         pos = cm.end() if cm else len(clean_line)
@@ -656,12 +697,17 @@ def parse_html_symbols(lines, skip_frontmatter=False):
                         clean_line, in_comment = _strip_html_comments_line(lines[i], False)
                         cm = close_script_re.search(clean_line)
                         pos = cm.end() if cm else len(clean_line)
+                        line_for_ids = clean_line[pos:]
             elif tag == 'link' and 'rel="stylesheet"' in attrs.lower() and 'href=' in attrs.lower():
                 href_match = re.search(r'href=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
                 if href_match:
                     symbols.append(format_symbol(f'<link rel="stylesheet" href="{href_match.group(1)}">', idx))
+
+        for im in any_id_tag_pattern.finditer(line_for_ids):
+            if im.group(1).lower() not in landmark_tags:
+                symbols.append(format_symbol(f'#{im.group(3)} <{im.group(1).lower()}>', idx))
         i += 1
-    return symbols
+    return sort_symbols_by_line(symbols)
 
 
 def extract_inline_script_blocks(lines):
@@ -721,6 +767,8 @@ def parse_css_symbols(lines):
     var_pattern = re.compile(r'^\s*(--[a-zA-Z0-9_\-]+)\s*:')
     id_rule = re.compile(r'^(#[a-zA-Z0-9_\-]+)\s*\{')
     class_rule = re.compile(r'^(\.[a-zA-Z0-9_\-]+)\s*\{')
+    media_rule = re.compile(r'^(@media\b[^{]+)\{')
+    keyframes_rule = re.compile(r'^(@keyframes\s+[a-zA-Z0-9_\-]+)\s*\{')
     in_block = False
 
     for idx, line in enumerate(lines, 1):
@@ -736,19 +784,27 @@ def parse_css_symbols(lines):
         if not sline or sline.startswith('*'):
             continue
 
-        v_match = var_pattern.match(sline)
-        if v_match:
-            symbols.append(format_symbol(f'var {v_match.group(1)}', idx))
-            continue
-        i_match = id_rule.match(sline)
-        if i_match:
-            end_line = find_brace_block_end(lines, idx - 1, line_comments=(), support_block_comments=True)
-            symbols.append(format_symbol(f'id {i_match.group(1)}', idx, end_line))
-            continue
-        c_match = class_rule.match(sline)
-        if c_match:
-            end_line = find_brace_block_end(lines, idx - 1, line_comments=(), support_block_comments=True)
-            symbols.append(format_symbol(f'class {c_match.group(1)}', idx, end_line))
+        for rule_re, prefix in ((keyframes_rule, ''), (media_rule, '')):
+            m = rule_re.match(sline)
+            if m:
+                end_line = find_brace_block_end(lines, idx - 1, line_comments=(), support_block_comments=True)
+                label = re.sub(r'\s+', ' ', m.group(1)).strip()
+                symbols.append(format_symbol(f'{prefix}{label}', idx, end_line))
+                break
+        else:
+            v_match = var_pattern.match(sline)
+            if v_match:
+                symbols.append(format_symbol(f'var {v_match.group(1)}', idx))
+                continue
+            i_match = id_rule.match(sline)
+            if i_match:
+                end_line = find_brace_block_end(lines, idx - 1, line_comments=(), support_block_comments=True)
+                symbols.append(format_symbol(f'id {i_match.group(1)}', idx, end_line))
+                continue
+            c_match = class_rule.match(sline)
+            if c_match:
+                end_line = find_brace_block_end(lines, idx - 1, line_comments=(), support_block_comments=True)
+                symbols.append(format_symbol(f'class {c_match.group(1)}', idx, end_line))
     return symbols
 
 
@@ -983,13 +1039,14 @@ def parse_code_symbols(lines, ext, line_offset=0):
     # JavaScript / TypeScript / JSX / TSX
     elif ext in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}:
         patterns = [
-            re.compile(r'^\s*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([a-zA-Z0-9_]+)'),
-            re.compile(r'^\s*(?:export\s+(?:default\s+)?)?interface\s+([a-zA-Z0-9_]+)'),
-            re.compile(r'^\s*(?:export\s+)?type\s+([a-zA-Z0-9_]+)\s*='),
-            re.compile(r'^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\('),
-            re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?\('),
-            re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?[a-zA-Z0-9_]+\s*=>'),
-            re.compile(r'^\s*(?:router|app)\.(get|post|put|delete|patch|use)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]')
+            ('class', re.compile(r'^\s*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([a-zA-Z0-9_]+)')),
+            ('interface', re.compile(r'^\s*(?:export\s+(?:default\s+)?)?interface\s+([a-zA-Z0-9_]+)')),
+            ('type', re.compile(r'^\s*(?:export\s+)?type\s+([a-zA-Z0-9_]+)\s*=')),
+            ('fn', re.compile(r'^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(')),
+            ('arrow_paren', re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?\(')),
+            ('fn', re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?[a-zA-Z0-9_]+\s*=>')),
+            ('fn', re.compile(r'^\s*((?:window|globalThis|exports|module\.exports)\.[a-zA-Z0-9_]+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)')),
+            ('route', re.compile(r'^\s*(?:router|app)\.(get|post|put|delete|patch|use)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]')),
         ]
         in_block_comment = False
         for idx, line in enumerate(lines, 1):
@@ -1004,26 +1061,20 @@ def parse_code_symbols(lines, ext, line_offset=0):
                 continue
             if not sline or sline.startswith('//') or sline.startswith('*'):
                 continue
-            for p_idx, p in enumerate(patterns):
+            for kind, p in patterns:
                 m = p.match(line)
-                if m:
-                    if p_idx == 4 and not _has_arrow_after_params(lines, idx - 1, m.end() - 1):
-                        continue
-                    if p_idx == 6:
-                        symbols.append(format_symbol(f'route {m.group(1).upper()} {m.group(2)}', idx + line_offset))
-                        break
-                    end_line = find_brace_block_end(lines, idx - 1, is_js=True)
-                    end_abs = (end_line + line_offset) if end_line else None
-                    if p_idx == 0:
-                        label = f'class {m.group(1)}'
-                    elif p_idx == 1:
-                        label = f'interface {m.group(1)}'
-                    elif p_idx == 2:
-                        label = f'type {m.group(1)}'
-                    else:
-                        label = f'fn {m.group(1)}()'
-                    symbols.append(format_symbol(label, idx + line_offset, end_abs))
+                if not m:
+                    continue
+                if kind == 'arrow_paren' and not _has_arrow_after_params(lines, idx - 1, m.end() - 1):
+                    continue
+                if kind == 'route':
+                    symbols.append(format_symbol(f'route {m.group(1).upper()} {m.group(2)}', idx + line_offset))
                     break
+                end_line = find_brace_block_end(lines, idx - 1, is_js=True)
+                end_abs = (end_line + line_offset) if end_line else None
+                label = f'{kind} {m.group(1)}' if kind in {'class', 'interface', 'type'} else f'fn {m.group(1)}()'
+                symbols.append(format_symbol(label, idx + line_offset, end_abs))
+                break
 
     # Rust / PowerShell
     elif ext == '.rs':
@@ -1084,8 +1135,200 @@ def parse_code_symbols(lines, ext, line_offset=0):
 
     return symbols
 
-def get_project_file_snapshot(root_path: Path, gitignore_patterns: list):
-    snapshot = {"__schema_version__": CACHE_SCHEMA_VERSION}
+def parse_yaml_symbols(lines):
+    symbols = []
+    container_keys = {'services', 'jobs', 'networks', 'volumes', 'stages', 'targets', 'routes', 'plugins', 'inputs', 'outputs'}
+    key_re = re.compile(r'^(\s*)([a-zA-Z0-9_.\-/]+)\s*:(?:\s*(.*))?$')
+    parent_key = None
+    parent_indent = None
+    child_indent = None
+    n = len(lines)
+
+    def _find_yaml_end(start_idx, base_indent):
+        last = start_idx + 1
+        for k in range(start_idx + 1, n):
+            raw = lines[k]
+            s = raw.strip()
+            if not s or s.startswith('#'):
+                continue
+            ind = len(raw) - len(raw.lstrip(' '))
+            if ind <= base_indent and not s.startswith('- '):
+                break
+            last = k + 1
+        return last if last > start_idx + 1 else None
+
+    for idx, line in enumerate(lines, 1):
+        s = line.strip()
+        if not s or s.startswith('#') or s in {'---', '...'}:
+            continue
+        m = key_re.match(line.rstrip('\r\n'))
+        if not m or m.group(2).startswith('-'):
+            continue
+        indent = len(m.group(1))
+        key = m.group(2)
+        if indent == 0:
+            parent_key = key if key in container_keys else None
+            parent_indent = indent if parent_key else None
+            child_indent = None
+            end_line = _find_yaml_end(idx - 1, indent)
+            symbols.append(format_symbol(f'key {key}', idx, end_line))
+        elif parent_key and parent_indent is not None and indent > parent_indent:
+            if child_indent is None:
+                child_indent = indent
+            if indent == child_indent:
+                end_line = _find_yaml_end(idx - 1, indent)
+                symbols.append(format_symbol(f'{parent_key}.{key}', idx, end_line))
+    return symbols
+
+
+def parse_json_symbols(lines):
+    if len(lines) > 1500:
+        return []
+    symbols = []
+    child_sections = {'scripts', 'targets', 'compilerOptions'}
+    key_re = re.compile(r'^\s*"([^"]+)"\s*:')
+    depth = 0
+    in_string = False
+    escape = False
+    active_section = None
+
+    for idx, line in enumerate(lines, 1):
+        if depth in {1, 2}:
+            km = key_re.match(line)
+            if km:
+                key = km.group(1)
+                if depth == 1:
+                    active_section = key if key in child_sections else None
+                    symbols.append(format_symbol(f'key "{key}"', idx))
+                elif depth == 2 and active_section:
+                    symbols.append(format_symbol(f'{active_section}.{key}', idx))
+
+        for ch in line:
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth = max(0, depth - 1)
+                if depth <= 1:
+                    active_section = None
+    return symbols
+
+
+def parse_makefile_symbols(lines):
+    symbols = []
+    target_re = re.compile(r'^([a-zA-Z0-9_.\-/]+)\s*:(?!=)')
+    for idx, line in enumerate(lines, 1):
+        s = line.strip()
+        if not s or s.startswith('#') or line.startswith('\t'):
+            continue
+        m = target_re.match(line)
+        if m and not m.group(1).startswith('.'):
+            symbols.append(format_symbol(f'target {m.group(1)}', idx))
+    return symbols
+
+
+def parse_dockerfile_symbols(lines):
+    symbols = []
+    inst_re = re.compile(r'^\s*(FROM|EXPOSE|ENTRYPOINT|CMD)\s+(.+)$', re.IGNORECASE)
+    for idx, line in enumerate(lines, 1):
+        s = line.strip()
+        if not s or s.startswith('#'):
+            continue
+        m = inst_re.match(s)
+        if m:
+            val = re.sub(r'\s+', ' ', m.group(2)).strip()[:50]
+            symbols.append(format_symbol(f'{m.group(1).upper()} {val}', idx))
+    return symbols
+
+
+def _read_go_module_name(root_path: Path):
+    gomod = root_path / 'go.mod'
+    if not gomod.is_file():
+        return None
+    try:
+        with open(gomod, 'r', encoding='utf-8-sig', errors='replace') as f:
+            for line in f:
+                m = re.match(r'^\s*module\s+(\S+)', line)
+                if m:
+                    return m.group(1).strip()
+    except Exception:
+        pass
+    return None
+
+
+def extract_file_refs(lines, ext, fname='', go_module=None):
+    """Extract lightweight internal imports, assets, templates, and endpoint refs."""
+    refs = []
+    text_joined = None
+
+    if ext == '.go':
+        in_import = False
+        import_str_re = re.compile(r'"([^"]+)"')
+        tmpl_re = re.compile(r'["`]([a-zA-Z0-9_./\-]+\.html)["`]')
+        for line in lines:
+            s = line.strip()
+            if s.startswith('//'):
+                continue
+            if re.match(r'^import\s*\(', s):
+                in_import = True
+                continue
+            if in_import:
+                if s.startswith(')'):
+                    in_import = False
+                    continue
+                m = import_str_re.search(s)
+                if m:
+                    imp = m.group(1)
+                    if (go_module and imp.startswith(go_module + '/')) or '/internal/' in imp or imp.startswith('internal/'):
+                        short_imp = imp[len(go_module) + 1:] if (go_module and imp.startswith(go_module + '/')) else imp
+                        refs.append(f'pkg:{short_imp}')
+            elif s.startswith('import '):
+                m = import_str_re.search(s)
+                if m:
+                    imp = m.group(1)
+                    if (go_module and imp.startswith(go_module + '/')) or '/internal/' in imp:
+                        short_imp = imp[len(go_module) + 1:] if (go_module and imp.startswith(go_module + '/')) else imp
+                        refs.append(f'pkg:{short_imp}')
+            for tm in tmpl_re.finditer(line):
+                refs.append(f'tmpl:{tm.group(1)}')
+
+    elif ext in {'.html', '.htm', '.astro', '.svelte', '.vue'}:
+        text_joined = ''.join(lines)
+        for m in re.finditer(r'<(?:script[^>]+src|link[^>]+href)=["\']([^"\']+)["\']', text_joined, re.IGNORECASE):
+            refs.append(m.group(1))
+        for m in re.finditer(r'\{\{-?\s*(?:template|block)\s+["\']([^"\']+)["\']', text_joined):
+            refs.append(f'tmpl:{m.group(1)}')
+        for m in re.finditer(r'\bfetch\s*\(\s*[\'"`](/[^\'`"\s)]+)', text_joined):
+            refs.append(f'api:{m.group(1)}')
+
+    elif ext in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}:
+        text_joined = ''.join(lines)
+        for m in re.finditer(r'(?:from\s+|import\s*\(|require\s*\()\s*[\'"`](\.\.?/[^\'"]+)[\'"`]', text_joined):
+            refs.append(m.group(1))
+        for m in re.finditer(r'\bfetch\s*\(\s*[\'"`](/[^\'`"\s)]+)', text_joined):
+            refs.append(f'api:{m.group(1)}')
+
+    elif ext == '.py':
+        for line in lines:
+            m = re.match(r'^\s*from\s+(\.[a-zA-Z0-9_\.]*)\s+import\b', line)
+            if m:
+                refs.append(m.group(1))
+
+    return list(dict.fromkeys(refs))
+
+
+def iter_project_files(root_path: Path, gitignore_patterns: list):
+    """Yield (rel_file_path, full_file_path, fname, ext) for all non-ignored indexable files."""
     for dirpath, dirnames, filenames in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
         if rel_dir == '.':
@@ -1098,112 +1341,360 @@ def get_project_file_snapshot(root_path: Path, gitignore_patterns: list):
             ext = os.path.splitext(fname)[1].lower()
             if ext in BINARY_EXTENSIONS or fname in {CACHE_FILENAME, '.repo-map.md'}:
                 continue
-            full_file_path = Path(dirpath) / fname
-            try:
-                snapshot[rel_file_path] = full_file_path.stat().st_mtime
-            except Exception:
-                pass
+            if ext == '.json' and any(fname.lower().endswith(sfx) for sfx in SKIP_JSON_SUFFIXES):
+                continue
+            yield rel_file_path, Path(dirpath) / fname, fname, ext
+
+
+def parse_file_content(lines, fname, ext, go_module=None):
+    """Parse symbols and cross-file refs for a single file."""
+    symbols = []
+    lower_name = fname.lower()
+
+    if ext in {'.html', '.htm'}:
+        symbols = parse_html_symbols(lines)
+        for block_offset, block_lines in extract_inline_script_blocks(lines):
+            symbols.extend(parse_code_symbols(block_lines, '.js', line_offset=block_offset))
+        symbols = sort_symbols_by_line(symbols)
+    elif ext in {'.astro', '.svelte', '.vue'}:
+        symbols = sort_symbols_by_line(parse_code_symbols(lines, '.ts') + parse_html_symbols(lines, skip_frontmatter=(ext == '.astro')))
+    elif ext in {'.css', '.scss', '.sass'}:
+        symbols = parse_css_symbols(lines)
+    elif ext in {'.md', '.mdx'}:
+        symbols = parse_markdown_symbols(lines)
+    elif ext == '.sql':
+        symbols = parse_sql_symbols(lines)
+    elif ext in {'.yml', '.yaml'}:
+        symbols = parse_yaml_symbols(lines)
+    elif ext == '.json':
+        symbols = parse_json_symbols(lines)
+    elif lower_name in {'makefile', 'gnumakefile'} or ext == '.mk':
+        symbols = parse_makefile_symbols(lines)
+    elif lower_name.startswith('dockerfile') or ext == '.dockerfile':
+        symbols = parse_dockerfile_symbols(lines)
+    elif ext in {'.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.java', '.cs', '.go', '.php', '.c', '.cpp', '.h', '.hpp', '.rs', '.ps1', '.psm1'}:
+        symbols = parse_code_symbols(lines, ext)
+
+    refs = extract_file_refs(lines, ext, fname=fname, go_module=go_module)
+    return symbols, refs
+
+
+def load_cache(cache_file: Path):
+    if not cache_file.is_file():
+        return None
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get('__schema_version__') == CACHE_SCHEMA_VERSION and isinstance(data.get('files'), dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def get_project_file_snapshot(root_path: Path, gitignore_patterns: list):
+    snapshot = {}
+    for rel_file_path, full_file_path, _, _ in iter_project_files(root_path, gitignore_patterns):
+        try:
+            st = full_file_path.stat()
+            snapshot[rel_file_path] = {'mtime': st.st_mtime, 'size': st.st_size}
+        except Exception:
+            pass
     return snapshot
 
-def scan_project(root_dir: str):
+
+def scan_project(root_dir: str, cached_files=None):
     root_path = Path(root_dir).resolve()
     gitignore_patterns = load_gitignore(root_path)
+    go_module = _read_go_module_name(root_path)
+    cached_files = cached_files or {}
+
     file_entries = []
-    
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        if rel_dir == '.':
-            rel_dir = ''
-        dirnames[:] = [d for d in dirnames if not is_ignored(os.path.join(rel_dir, d), root_path, gitignore_patterns)]
-        
-        for fname in sorted(filenames):
-            rel_file_path = os.path.normpath(os.path.join(rel_dir, fname)).replace('\\', '/')
-            if is_ignored(rel_file_path, root_path, gitignore_patterns):
-                continue
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in BINARY_EXTENSIONS or fname in {CACHE_FILENAME, '.repo-map.md'}:
-                continue
-            
-            full_file_path = Path(dirpath) / fname
+    new_cache_files = {}
+    reparsed_count = 0
+
+    for rel_file_path, full_file_path, fname, ext in iter_project_files(root_path, gitignore_patterns):
+        try:
+            st = full_file_path.stat()
+            mtime, size = st.st_mtime, st.st_size
+        except Exception:
+            continue
+
+        cached = cached_files.get(rel_file_path)
+        if (
+            isinstance(cached, dict)
+            and cached.get('mtime') == mtime
+            and cached.get('size') == size
+            and isinstance(cached.get('symbols'), list)
+        ):
+            line_count = cached.get('lines', 0)
+            symbols = cached['symbols']
+            refs = cached.get('refs', [])
+        else:
             try:
                 with open(full_file_path, 'r', encoding='utf-8-sig', errors='replace') as f:
                     lines = f.readlines()
-                line_count = len(lines)
             except Exception:
                 continue
-            
-            symbols = []
-            if ext in {'.html', '.htm'}:
-                symbols = parse_html_symbols(lines)
-                for block_offset, block_lines in extract_inline_script_blocks(lines):
-                    symbols.extend(parse_code_symbols(block_lines, '.js', line_offset=block_offset))
-                symbols = sort_symbols_by_line(symbols)
-            elif ext in {'.astro', '.svelte', '.vue'}:
-                symbols = sort_symbols_by_line(parse_code_symbols(lines, '.ts') + parse_html_symbols(lines, skip_frontmatter=(ext == '.astro')))
-            elif ext in {'.css', '.scss', '.sass'}:
-                symbols = parse_css_symbols(lines)
-            elif ext in {'.md', '.mdx'}:
-                symbols = parse_markdown_symbols(lines)
-            elif ext == '.sql':
-                symbols = parse_sql_symbols(lines)
-            elif ext in {'.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.java', '.cs', '.go', '.php', '.c', '.cpp', '.h', '.hpp', '.rs', '.ps1', '.psm1'}:
-                symbols = parse_code_symbols(lines, ext)
+            line_count = len(lines)
+            symbols, refs = parse_file_content(lines, fname, ext, go_module=go_module)
+            reparsed_count += 1
 
-            file_entries.append({
-                'path': rel_file_path,
-                'lines': line_count,
-                'symbols': symbols
-            })
-            
-    return file_entries
+        entry = {
+            'path': rel_file_path,
+            'lines': line_count,
+            'symbols': symbols,
+            'refs': refs,
+        }
+        file_entries.append(entry)
+        new_cache_files[rel_file_path] = {
+            'mtime': mtime,
+            'size': size,
+            'lines': line_count,
+            'symbols': symbols,
+            'refs': refs,
+        }
 
-def generate_markdown(file_entries, root_name="Project", max_symbols=60):
+    return file_entries, new_cache_files, reparsed_count
+
+
+def is_test_file(rel_path: str) -> bool:
+    norm = rel_path.replace('\\', '/').lower()
+    fname = os.path.basename(norm)
+    parts = norm.split('/')
+    if any(p in {'tests', '__tests__', 'test'} for p in parts[:-1]):
+        return True
+    return (
+        fname.endswith('_test.go')
+        or fname.endswith('_test.py')
+        or fname.startswith('test_') and fname.endswith('.py')
+        or '.test.' in fname
+        or '.spec.' in fname
+    )
+
+
+def _format_entry_symbols(entry, max_symbols=60, compact=False):
+    syms = entry['symbols']
+    if not syms:
+        return ""
+    p = entry['path']
+    ext = os.path.splitext(p)[1].lower()
+    indent = "  "
+
+    if compact and is_test_file(p):
+        test_count = sum(1 for s in syms if 'test' in s.lower())
+        count_label = test_count or len(syms)
+        return f"\n{indent}  - [{count_label} test symbols omitted in --compact; use --find]"
+
+    if compact and ext in {'.css', '.scss', '.sass'}:
+        vars_count = sum(1 for s in syms if s.startswith('var '))
+        structural = [s for s in syms if s.startswith(('@media', '@keyframes', 'id #'))]
+        kept = structural[:20]
+        omitted = len(syms) - len(kept)
+        lines_out = [f"{indent}  - {s}" for s in kept]
+        if omitted > 0:
+            lines_out.append(f"{indent}  - ... ({vars_count} vars, {omitted} selectors omitted in --compact; use --find)")
+        return "\n" + "\n".join(lines_out)
+
+    shown = syms[:max_symbols] if max_symbols > 0 else syms
+    sym_items = [f"{indent}  - {s}" for s in shown]
+    if max_symbols > 0 and len(syms) > max_symbols:
+        sym_items.append(f"{indent}  - ... (+{len(syms) - max_symbols} more; use --find)")
+    return "\n" + "\n".join(sym_items)
+
+
+def _filter_by_scope(file_entries, scope=None):
+    if not scope:
+        return file_entries
+    s = scope.strip().strip('/').lower()
+    return [e for e in file_entries if s in e['path'].lower()]
+
+
+def generate_markdown(file_entries, root_name="Project", max_symbols=60, compact=False, no_wiring=False):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     total_files = len(file_entries)
     total_lines = sum(e['lines'] for e in file_entries)
-    
+
     md = []
     md.append(f"# Codebase Skeleton & Repository Map: {root_name}")
     md.append(f"> **Updated:** {now_str} | **Total Files:** {total_files} | **Total LOC:** {total_lines}")
     md.append("> **Rule for Agents:** Read this map first. Identify exact files and line ranges (`Lxx` or `Lxx-Lyy`) before reading or modifying code. Never scan whole directories blindly.\n")
     md.append("## Directory Tree & Symbol Index\n")
-    
+
     current_folder = None
     for entry in file_entries:
         p = entry['path']
         folder = os.path.dirname(p) or "/"
         fname = os.path.basename(p)
-        
+
         if folder != current_folder:
             current_folder = folder
             md.append(f"\n### `{current_folder}`")
-            
-        sym_str = ""
-        syms = entry['symbols']
-        if syms:
-            shown = syms[:max_symbols] if max_symbols > 0 else syms
-            indent = "  "
-            sym_items = "\n".join([f"{indent}  - {s}" for s in shown])
-            if max_symbols > 0 and len(syms) > max_symbols:
-                sym_items += f"\n{indent}  - ... (+{len(syms) - max_symbols} more; use --find)"
-            sym_str = f"\n{sym_items}"
-            
+
+        sym_str = _format_entry_symbols(entry, max_symbols=max_symbols, compact=compact)
         md.append(f"- **`{fname}`** (Lines: {entry['lines']}){sym_str}")
-        
+
+    if not no_wiring:
+        wiring_lines = []
+        for entry in file_entries:
+            refs = entry.get('refs') or []
+            if not refs:
+                continue
+            shown_refs = refs[:8]
+            suffix = f" (+{len(refs) - 8} more)" if len(refs) > 8 else ""
+            wiring_lines.append(f"- `{entry['path']}` -> {', '.join(f'`{r}`' for r in shown_refs)}{suffix}")
+        if wiring_lines:
+            md.append("\n## Cross-References & Wiring\n")
+            md.extend(wiring_lines)
+
     return "\n".join(md)
 
-def search_symbols(file_entries, query):
-    terms = [t.strip().lower() for t in query.split('|') if t.strip()]
-    if not terms:
-        return []
+
+def search_symbols(file_entries, query, scope=None, use_regex=False):
+    scoped = _filter_by_scope(file_entries, scope)
+    if use_regex:
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            print(f"[RepoMap] Invalid regex '{query}': {exc}", file=sys.stderr)
+            sys.exit(1)
+        matcher = lambda text: bool(pattern.search(text))
+    else:
+        terms = [t.strip().lower() for t in query.split('|') if t.strip()]
+        if not terms:
+            return []
+        matcher = lambda text: any(t in text.lower() for t in terms)
+
     matches = []
-    for entry in file_entries:
+    for entry in scoped:
         p = entry['path']
-        p_low = p.lower()
-        matched_symbols = [s for s in entry['symbols'] if any(t in s.lower() for t in terms)]
-        if any(t in p_low for t in terms) or matched_symbols:
-            matches.append((p, entry['lines'], matched_symbols))
+        syms = entry['symbols']
+        refs = entry.get('refs') or []
+        matched_syms = [s for s in syms if matcher(s)]
+        matched_refs = [f'ref: {r}' for r in refs if matcher(r)]
+        path_hit = matcher(p)
+
+        if matched_syms or matched_refs or path_hit:
+            out_syms = matched_syms + matched_refs
+            if path_hit and not out_syms and syms:
+                out_syms = list(syms[:25])
+                if len(syms) > 25:
+                    out_syms.append(f"... (+{len(syms) - 25} more symbols in {os.path.basename(p)})")
+            matches.append((p, entry['lines'], out_syms))
     return matches
+
+
+def get_git_changed_paths(root_path: Path):
+    try:
+        res = subprocess.run(
+            ['git', 'status', '--porcelain', '-uall'],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=False,
+        )
+        if res.returncode != 0:
+            return None
+        changed = set()
+        for line in res.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            raw_path = line[3:].strip()
+            if ' -> ' in raw_path:
+                raw_path = raw_path.split(' -> ', 1)[1].strip()
+            changed.add(raw_path.strip('"').replace('\\', '/'))
+        if not changed:
+            # Also include files modified in HEAD commit when working tree is clean
+            diff_res = subprocess.run(
+                ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'],
+                cwd=str(root_path),
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                check=False,
+            )
+            if diff_res.returncode == 0:
+                for line in diff_res.stdout.splitlines():
+                    if line.strip():
+                        changed.add(line.strip().replace('\\', '/'))
+        return changed
+    except Exception:
+        return None
+
+
+def print_stats(file_entries, out_file: Path):
+    total_files = len(file_entries)
+    total_lines = sum(e['lines'] for e in file_entries)
+    total_syms = sum(len(e['symbols']) for e in file_entries)
+    total_refs = sum(len(e.get('refs') or []) for e in file_entries)
+    map_info = ""
+    if out_file.is_file():
+        sz = out_file.stat().st_size
+        map_info = f" | Current map: {sz} bytes (~{sz // 4} tokens)"
+    print(f"[RepoMap] Files: {total_files} | LOC: {total_lines} | Symbols: {total_syms} | Refs: {total_refs}{map_info}")
+    print("  Largest files (LOC):")
+    for e in sorted(file_entries, key=lambda x: x['lines'], reverse=True)[:8]:
+        print(f"    - {e['path']} ({e['lines']} LOC, {len(e['symbols'])} symbols)")
+
+
+def install_git_hooks(root_path: Path):
+    try:
+        res = subprocess.run(
+            ['git', 'rev-parse', '--git-path', 'hooks'],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            print("[RepoMap] Error: Not a git repository.", file=sys.stderr)
+            return 1
+        hooks_dir = Path(res.stdout.strip())
+        if not hooks_dir.is_absolute():
+            hooks_dir = (root_path / hooks_dir).resolve()
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        print(f"[RepoMap] Hook setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    script_posix = Path(__file__).resolve().as_posix()
+    start_marker = "# >>> token-and-context-ops repo-map >>>"
+    end_marker = "# <<< token-and-context-ops repo-map <<<"
+    hook_block = (
+        f"{start_marker}\n"
+        f'if [ -f .repo-map.md ]; then\n'
+        f'  (python "{script_posix}" . >/dev/null 2>&1 || python3 "{script_posix}" . >/dev/null 2>&1 || true)\n'
+        f"fi\n"
+        f"{end_marker}\n"
+    )
+
+    updated = []
+    for hook_name in ("post-commit", "post-merge"):
+        hook_path = hooks_dir / hook_name
+        existing = hook_path.read_text(encoding='utf-8') if hook_path.exists() else "#!/bin/sh\n"
+        if start_marker in existing and end_marker in existing:
+            new_text = re.sub(
+                rf"{re.escape(start_marker)}.*?{re.escape(end_marker)}\n?",
+                hook_block,
+                existing,
+                flags=re.DOTALL,
+            )
+        else:
+            sep = "" if existing.endswith("\n") else "\n"
+            new_text = existing + sep + hook_block
+        hook_path.write_text(new_text, encoding='utf-8', newline='\n')
+        try:
+            hook_path.chmod(0o755)
+        except Exception:
+            pass
+        updated.append(hook_name)
+
+    print(f"[RepoMap] Installed sync hooks ({', '.join(updated)}) in: {hooks_dir}")
+    return 0
+
 
 def main():
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -1215,66 +1706,112 @@ def main():
     parser.add_argument("path", nargs="?", default=".", help="Root directory of the project")
     parser.add_argument("--output", "-o", default=".repo-map.md", help="Output markdown file path (relative to root)")
     parser.add_argument("--check", action="store_true", help="Only check if map is stale without regenerating")
-    parser.add_argument("--find", "-f", help="Instant symbol search across project (supports '|' OR queries, e.g. 'Foo|Bar')")
+    parser.add_argument("--find", "-f", help="Instant symbol/path search across project (supports '|' OR queries)")
+    parser.add_argument("--in", "-i", dest="scope", help="Filter output/search to paths containing substring")
+    parser.add_argument("--regex", "-E", action="store_true", help="Treat --find query as a Python regular expression")
+    parser.add_argument("--changed", action="store_true", help="Print map symbols only for git-changed (or HEAD) files")
+    parser.add_argument("--stats", action="store_true", help="Print project LOC/symbol hotspot statistics")
+    parser.add_argument("--compact", action="store_true", help="Summarize test files and CSS selectors for smaller maps")
+    parser.add_argument("--no-wiring", action="store_true", help="Omit the Cross-References & Wiring section")
     parser.add_argument("--max-symbols", type=int, default=60, help="Max symbols per file in .repo-map.md (0 = unlimited; --find searches all symbols)")
+    parser.add_argument("--install-hook", action="store_true", help="Install idempotent git post-commit/post-merge sync hooks")
     args = parser.parse_args()
-    
+
     target_dir = Path(args.path).resolve()
     if not target_dir.is_dir():
         print(f"Error: Directory '{target_dir}' does not exist.")
         sys.exit(1)
-        
+
+    if args.install_hook:
+        sys.exit(install_git_hooks(target_dir))
+
     out_file = target_dir / args.output
     cache_file = target_dir / CACHE_FILENAME
     gitignore_patterns = load_gitignore(target_dir)
-    
-    current_snapshot = get_project_file_snapshot(target_dir, gitignore_patterns)
-    
-    # Check cache freshness
-    is_fresh = False
-    if out_file.exists() and cache_file.exists():
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                cached_snapshot = json.load(f)
-            if cached_snapshot == current_snapshot:
-                is_fresh = True
-        except Exception:
-            is_fresh = False
-            
-    if args.check:
-        status_msg = "UP_TO_DATE" if is_fresh else "STALE"
-        print(f"[RepoMap] Status: {status_msg}")
-        sys.exit(0 if is_fresh else 2)
 
-    if is_fresh and not args.find:
+    cached_data = load_cache(cache_file)
+    cached_files = cached_data['files'] if cached_data else {}
+    current_snapshot = get_project_file_snapshot(target_dir, gitignore_patterns)
+    cached_snapshot = (
+        {p: {'mtime': v.get('mtime'), 'size': v.get('size')} for p, v in cached_files.items()}
+        if cached_data else None
+    )
+    files_fresh = out_file.exists() and (cached_snapshot == current_snapshot)
+
+    if args.check:
+        status_msg = "UP_TO_DATE" if files_fresh else "STALE"
+        print(f"[RepoMap] Status: {status_msg}")
+        sys.exit(0 if files_fresh else 2)
+
+    render_opts = {
+        'compact': args.compact,
+        'no_wiring': args.no_wiring,
+        'max_symbols': args.max_symbols,
+        'scope': args.scope or '',
+    }
+    read_only_mode = bool(args.find or args.changed or args.stats)
+    is_fresh = files_fresh and (cached_data.get('options') == render_opts if cached_data else False)
+
+    if is_fresh and not read_only_mode:
         print(f"[RepoMap] Map is already fresh (0 changes detected). Output: {out_file}")
         sys.exit(0)
-        
-    entries = scan_project(str(target_dir))
-    
+
+    entries, new_cache_files, reparsed = scan_project(str(target_dir), cached_files=cached_files)
+
+    if args.stats:
+        print_stats(_filter_by_scope(entries, args.scope), out_file)
+        sys.exit(0)
+
+    if args.changed:
+        changed_set = get_git_changed_paths(target_dir)
+        if changed_set is None:
+            print("[RepoMap] Error: git status unavailable.", file=sys.stderr)
+            sys.exit(1)
+        filtered = _filter_by_scope([e for e in entries if e['path'] in changed_set], args.scope)
+        print(f"[RepoMap] Changed files ({len(filtered)}):")
+        for e in filtered:
+            print(f"  * {e['path']} (LOC: {e['lines']})")
+            for s in e['symbols']:
+                print(f"      - {s}")
+            if e.get('refs'):
+                print(f"      refs: {', '.join(e['refs'][:8])}")
+        sys.exit(0)
+
     if args.find:
-        results = search_symbols(entries, args.find)
+        results = search_symbols(entries, args.find, scope=args.scope, use_regex=args.regex)
         print(f"[RepoMap] Search results for '{args.find}':")
         if not results:
             print("  No symbols or files matched.")
         for path, lines, syms in results:
-            print(f"  • {path} (LOC: {lines})")
+            print(f"  * {path} (LOC: {lines})")
             for s in syms:
                 print(f"      - {s}")
         sys.exit(0)
-        
-    content = generate_markdown(entries, root_name=target_dir.name, max_symbols=args.max_symbols)
+
+    scoped_entries = _filter_by_scope(entries, args.scope)
+    content = generate_markdown(
+        scoped_entries,
+        root_name=target_dir.name,
+        max_symbols=args.max_symbols,
+        compact=args.compact,
+        no_wiring=args.no_wiring,
+    )
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(content)
-        
+
     try:
+        cache_payload = {
+            '__schema_version__': CACHE_SCHEMA_VERSION,
+            'options': render_opts,
+            'files': new_cache_files,
+        }
         with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(current_snapshot, f)
+            json.dump(cache_payload, f)
     except Exception:
         pass
-        
+
     print(f"[RepoMap] Generated updated repository map at: {out_file}")
-    print(f"[RepoMap] Indexed {len(entries)} files | Size: {len(content.encode('utf-8'))} bytes (~{len(content)//4} tokens)")
+    print(f"[RepoMap] Indexed {len(scoped_entries)} files (reparsed {reparsed}) | Size: {len(content.encode('utf-8'))} bytes (~{len(content)//4} tokens)")
 
 if __name__ == "__main__":
     main()

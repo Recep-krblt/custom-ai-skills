@@ -13,7 +13,7 @@ This skill provides deterministic, token-efficient codebase navigation for multi
 
 ## Standard Protocol: "Map-First" Navigation
 
-The agent MUST follow this 4-tier navigation sequence without deviation:
+The agent MUST follow this 5-tier navigation & sync sequence without deviation:
 
 ### Tier 1: Check or Synchronize the Map
 Check if `.repo-map.md` exists in the project root. If missing or stale (files modified/added), execute the generator script:
@@ -36,5 +36,10 @@ If the problem is a runtime bug, subtle logic flaw, CSS collision, or side-effec
 - **NEVER dismiss the issue** or conclude that "no problem exists".
 - Escalate immediately to targeted token-filtered searches (`Select-String` / targeted regex on specific error keywords) or `quality-testing-review` (`references/systematic-debugging.md`).
 - Read the suspect file in full or inspect runtime logs/tests until the root cause is resolved (`quality-testing-review` (`references/verification-before-completion.md`)).
+
+### Tier 5: Task-End Sync Rule
+- **When to Sync:** Whenever `.repo-map.md` already exists in the repository AND any indexed file (code, template, stylesheet, config, or docs) was edited, added, or removed during the task (since line ranges `Lxx-Lyy` shift even without new files).
+- **Timing:** Run `python "C:\Users\<USERNAME>\.gemini\config\skills\token-and-context-ops\scripts\generate_repo_map.py" .` **once** right after all edits and verification tests pass—never after intermediate edits (fast `mtime` caching in `.repo-map.cache.json` refreshes only changed files).
+- **Scope Guard:** Do not create `.repo-map.md` unprompted in small/single-file projects that do not already have one unless the user explicitly asks to scan/map the project.
 
 > Script options: pass `--check` to verify freshness, `--max-symbols 0` to lift per-file markdown truncation, or `--find "A|B|C"` for lossless multi-query OR search across all indexed symbols (Go structs/interfaces/receivers/routes, SQL `CREATE`/`ALTER TABLE`, `.html` inline `<script>` JS, `.astro`/`.svelte`/`.vue`, `.rs`, `.ps1`, `.md`).

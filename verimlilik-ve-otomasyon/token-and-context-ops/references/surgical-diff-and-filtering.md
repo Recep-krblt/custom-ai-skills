@@ -2,6 +2,7 @@
 
 ## 1. PowerShell & Terminal Output Filtering
 Never dump unfiltered `cat`, `Get-Content`, or raw test output into the context window:
+- **RTK CLI Proxy (Single Dev Commands):** Prefix high-noise commands with `rtk` (`rtk git status`, `rtk git diff`, `rtk git log`, `rtk go test ./...`, `rtk pytest`, `rtk npm test`, `rtk cargo test`) when `rtk` is installed (`RTK_TELEMETRY_DISABLED=1`). Do not wrap machine-parsed flags (`--porcelain`, `rev-parse`) or multi-line PowerShell scripts with `rtk`.
 - **Stack Trace / Test Failure Filtering:**
   ```powershell
   dotnet test 2>&1 | Select-String -Pattern "FAIL|Error|Exception" -Context 0, 2

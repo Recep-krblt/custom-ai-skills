@@ -18,11 +18,11 @@ The agent MUST follow this 5-tier navigation & sync sequence without deviation:
 ### Tier 1: Check or Synchronize the Map
 Check if `.repo-map.md` exists in the project root. If missing or stale (files modified/added), execute the generator script:
 ```powershell
-python "C:\Users\<USERNAME>\.gemini\config\skills\token-and-context-ops\scripts\generate_repo_map.py" .
+python "$HOME/.gemini/config/skills/token-and-context-ops/scripts/generate_repo_map.py" .
 ```
 For instant symbol lookup (supports `|` OR queries) without parsing the entire markdown file:
 ```powershell
-python "C:\Users\<USERNAME>\.gemini\config\skills\token-and-context-ops\scripts\generate_repo_map.py" . --find "SymbolA|SymbolB|POST /admin"
+python "$HOME/.gemini/config/skills/token-and-context-ops/scripts/generate_repo_map.py" . --find "SymbolA|SymbolB|POST /admin"
 ```
 
 ### Tier 2: Zero Blind Reads
@@ -39,7 +39,7 @@ If the problem is a runtime bug, subtle logic flaw, CSS collision, or side-effec
 
 ### Tier 5: Task-End Sync Rule
 - **When to Sync:** Whenever `.repo-map.md` already exists in the repository AND any indexed file (code, template, stylesheet, config, or docs) was edited, added, or removed during the task (since line ranges `Lxx-Lyy` shift even without new files).
-- **Timing:** Run `python "C:\Users\<USERNAME>\.gemini\config\skills\token-and-context-ops\scripts\generate_repo_map.py" .` **once** right after all edits and verification tests pass—never after intermediate edits (v4 incremental symbol caching in `.repo-map.cache.json` reparses only changed files).
+- **Timing:** Run `python "$HOME/.gemini/config/skills/token-and-context-ops/scripts/generate_repo_map.py" .` **once** right after all edits and verification tests pass—never after intermediate edits (v4 incremental symbol caching in `.repo-map.cache.json` reparses only changed files).
 - **Scope Guard:** Do not create `.repo-map.md` unprompted in small/single-file projects that do not already have one unless the user explicitly asks to scan/map the project.
 
-> **CLI Options:** `--check` (exit 0 fresh / 2 stale), `--compact` (omit individual test cases and CSS selector lists in markdown; `--find` still searches everything), `--no-wiring` (omit `## Cross-References & Wiring`), `--find "A|B|C"` (searches symbols, paths, and wiring refs; use `--in <subpath>` to scope and `--regex` for regex matching), `--changed` (symbols for git-modified/HEAD files only), `--stats` (LOC & token hotspot summary), `--install-hook` (add idempotent `post-commit`/`post-merge` sync hooks), `--max-symbols 0` (lift per-file cap). Supports Go (incl. `{{define}}` templates & internal wiring), HTML (`#id` + inline JS), CSS (`@media`/`@keyframes`/vars), JS/TS (`window.*` exports), Python, Rust, SQL, YAML, JSON, Makefile, Dockerfile, PowerShell, Markdown.
+> **CLI Options:** `--check` (exit 0 fresh / 2 stale; validates explicit `--compact`/`--no-wiring`/`--max-symbols` options too), `--compact` (omit individual test cases and CSS selector lists in markdown; `--find` still searches everything), `--no-wiring` (omit `## Cross-References & Wiring`), `--find "A|B|C"` (searches symbols, paths, and wiring refs; combine with `--in <subpath>` and `--regex`), `--changed` (symbols for git-changed files, falling back past map-only `HEAD` sync commits), `--stats` (LOC & token hotspot summary), `--install-hook` (add idempotent `post-commit`/`post-merge` hooks; note: `post-commit` updates `.repo-map.md` in the working tree leaving it unstaged), `--max-symbols 0` (lift per-file cap). Writing a scoped map via `--in` requires `--output <file>` so root `.repo-map.md` is not overwritten. Indexes `.github/workflows` alongside Go (incl. `{{define}}` templates & internal wiring), HTML (`#id` + inline JS), CSS (`@media`/`@keyframes`/vars), JS/TS (`window.*` exports), Python, Rust, SQL, YAML, JSON, Makefile, Dockerfile, PowerShell, and Markdown.

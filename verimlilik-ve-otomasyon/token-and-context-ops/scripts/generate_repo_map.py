@@ -579,17 +579,20 @@ def is_ignored(rel_path_str: str, root_path: Path, gitignore_patterns: list) -> 
         if part in DEFAULT_IGNORES:
             return True
         if part.startswith('.') and part not in {'.', '..'}:
-            if len(parts) > 1 and part in {'.github', '.vscode', '.idea'}:
+            if len(parts) > 1 and part in {'.vscode', '.idea'}:
                 return True
 
     for pattern in gitignore_patterns:
+        anchored = pattern.startswith('/')
         cleaned = pattern.lstrip('/')
-        if fnmatch.fnmatch(norm_path, cleaned) or fnmatch.fnmatch(parts[-1] if parts else '', cleaned):
-            return True
-        if any(fnmatch.fnmatch(part, cleaned) for part in parts):
-            return True
-        if '/' in cleaned and (norm_path.startswith(cleaned + '/') or f'/{cleaned}/' in f'/{norm_path}/'):
-            return True
+        if anchored or '/' in cleaned:
+            if fnmatch.fnmatch(norm_path, cleaned) or norm_path.startswith(cleaned + '/'):
+                return True
+        else:
+            if fnmatch.fnmatch(norm_path, cleaned) or fnmatch.fnmatch(parts[-1] if parts else '', cleaned):
+                return True
+            if any(fnmatch.fnmatch(part, cleaned) for part in parts):
+                return True
     return False
 
 def _find_go_tmpl_end(lines, start_idx):
@@ -1333,7 +1336,7 @@ def iter_project_files(root_path: Path, gitignore_patterns: list):
         rel_dir = os.path.relpath(dirpath, root_path)
         if rel_dir == '.':
             rel_dir = ''
-        dirnames[:] = [d for d in dirnames if not is_ignored(os.path.join(rel_dir, d), root_path, gitignore_patterns)]
+        dirnames[:] = sorted(d for d in dirnames if not is_ignored(os.path.join(rel_dir, d), root_path, gitignore_patterns))
         for fname in sorted(filenames):
             rel_file_path = os.path.normpath(os.path.join(rel_dir, fname)).replace('\\', '/')
             if is_ignored(rel_file_path, root_path, gitignore_patterns):
@@ -1606,9 +1609,9 @@ def get_git_changed_paths(root_path: Path):
                 raw_path = raw_path.split(' -> ', 1)[1].strip()
             changed.add(raw_path.strip('"').replace('\\', '/'))
         if not changed:
-            # Also include files modified in HEAD commit when working tree is clean
-            diff_res = subprocess.run(
-                ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'],
+            # Skip map-only sync commits when working tree is clean (check up to 5 recent commits)
+            log_res = subprocess.run(
+                ['git', 'log', '-n', '5', '--format=%H'],
                 cwd=str(root_path),
                 capture_output=True,
                 text=True,
@@ -1616,10 +1619,27 @@ def get_git_changed_paths(root_path: Path):
                 errors='replace',
                 check=False,
             )
-            if diff_res.returncode == 0:
-                for line in diff_res.stdout.splitlines():
-                    if line.strip():
-                        changed.add(line.strip().replace('\\', '/'))
+            if log_res.returncode == 0:
+                for sha in [s.strip() for s in log_res.stdout.splitlines() if s.strip()]:
+                    diff_res = subprocess.run(
+                        ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+                        cwd=str(root_path),
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        check=False,
+                    )
+                    if diff_res.returncode != 0:
+                        continue
+                    commit_files = {
+                        line.strip().replace('\\', '/')
+                        for line in diff_res.stdout.splitlines()
+                        if line.strip()
+                    } - {'.repo-map.md', CACHE_FILENAME}
+                    if commit_files:
+                        changed = commit_files
+                        break
         return changed
     except Exception:
         return None
@@ -1678,7 +1698,7 @@ def install_git_hooks(root_path: Path):
         if start_marker in existing and end_marker in existing:
             new_text = re.sub(
                 rf"{re.escape(start_marker)}.*?{re.escape(end_marker)}\n?",
-                hook_block,
+                lambda _: hook_block,
                 existing,
                 flags=re.DOTALL,
             )
@@ -1737,12 +1757,6 @@ def main():
         if cached_data else None
     )
     files_fresh = out_file.exists() and (cached_snapshot == current_snapshot)
-
-    if args.check:
-        status_msg = "UP_TO_DATE" if files_fresh else "STALE"
-        print(f"[RepoMap] Status: {status_msg}")
-        sys.exit(0 if files_fresh else 2)
-
     render_opts = {
         'compact': args.compact,
         'no_wiring': args.no_wiring,
@@ -1750,6 +1764,22 @@ def main():
         'scope': args.scope or '',
     }
     read_only_mode = bool(args.find or args.changed or args.stats)
+    has_explicit_render_flag = bool(args.compact or args.no_wiring or args.max_symbols != 60 or args.scope)
+
+    if args.check:
+        opts_ok = True
+        if has_explicit_render_flag:
+            cached_opts = cached_data.get('options') if isinstance(cached_data, dict) else None
+            opts_ok = (cached_opts == render_opts)
+        is_up_to_date = files_fresh and opts_ok
+        status_msg = "UP_TO_DATE" if is_up_to_date else "STALE"
+        print(f"[RepoMap] Status: {status_msg}")
+        sys.exit(0 if is_up_to_date else 2)
+
+    if args.scope and not read_only_mode and args.output == ".repo-map.md":
+        print("[RepoMap] Error: --in cannot overwrite root .repo-map.md; pass --output <file> or use with --find/--changed/--stats.", file=sys.stderr)
+        sys.exit(1)
+
     is_fresh = files_fresh and (cached_data.get('options') == render_opts if cached_data else False)
 
     if is_fresh and not read_only_mode:
@@ -1799,16 +1829,17 @@ def main():
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(content)
 
-    try:
-        cache_payload = {
-            '__schema_version__': CACHE_SCHEMA_VERSION,
-            'options': render_opts,
-            'files': new_cache_files,
-        }
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(cache_payload, f)
-    except Exception:
-        pass
+    if args.output == ".repo-map.md" and not args.scope:
+        try:
+            cache_payload = {
+                '__schema_version__': CACHE_SCHEMA_VERSION,
+                'options': render_opts,
+                'files': new_cache_files,
+            }
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_payload, f)
+        except Exception:
+            pass
 
     print(f"[RepoMap] Generated updated repository map at: {out_file}")
     print(f"[RepoMap] Indexed {len(scoped_entries)} files (reparsed {reparsed}) | Size: {len(content.encode('utf-8'))} bytes (~{len(content)//4} tokens)")

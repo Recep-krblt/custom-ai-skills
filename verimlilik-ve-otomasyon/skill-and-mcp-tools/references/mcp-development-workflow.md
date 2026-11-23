@@ -63,7 +63,7 @@ Don't mix the two in one project: v1 code samples (imports from `@modelcontextpr
 
 - **TypeScript SDK (v2)**: Use WebFetch to load `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/main/README.md`; the full docs index is `https://ts.sdk.modelcontextprotocol.io/v2/llms.txt`
 - [⚡ TypeScript Guide (v2)](./node_mcp_server_v2.md) - TypeScript patterns and examples
-- For v1 projects only: `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/v1.x/README.md` and the [TypeScript Guide (v1)](./node_mcp_server.md)
+- For existing v1 projects only: `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/v1.x/README.md` or [Migrating a v1 Server](./node_mcp_server_v2.md#migrating-a-v1-server)
 
 **For Python:**
 - **Python SDK**: Use WebFetch to load `https://raw.githubusercontent.com/modelcontextprotocol/python-sdk/main/README.md`
@@ -84,7 +84,7 @@ Prioritize comprehensive API coverage. List endpoints to implement, starting wit
 #### 2.1 Set Up Project Structure
 
 See language-specific guides for project setup:
-- [⚡ TypeScript Guide (v2)](./node_mcp_server_v2.md) - Project structure, package.json, tsconfig.json ([v1](./node_mcp_server.md) for existing v1 projects)
+- [⚡ TypeScript Guide (v2)](./node_mcp_server_v2.md) - Project structure, package.json, tsconfig.json (plus [v1→v2 migration guide](./node_mcp_server_v2.md#migrating-a-v1-server))
 - [🐍 Python Guide](./python_mcp_server.md) - Module organization, dependencies
 
 #### 2.2 Implement Core Infrastructure
@@ -234,8 +234,6 @@ Load these resources as needed during development:
   - A self-check script to verify the built server
   - Links to SDK examples for advanced features
   - A v1 → v2 translation table, migration steps, and a quality checklist
-
-- [⚡ TypeScript Implementation Guide (SDK v1)](./node_mcp_server.md) - The equivalent guide for existing `@modelcontextprotocol/sdk` projects
 
 ### Evaluation Guide (Load During Phase 4)
 - [✅ Evaluation Guide](./evaluation.md) - Complete evaluation creation guide with:

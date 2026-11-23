@@ -1,6 +1,6 @@
 # Node/TypeScript MCP Server Implementation Guide (SDK v2)
 
-This guide covers building MCP servers with **v2 of the MCP TypeScript SDK** (`@modelcontextprotocol/server`), the current stable release. If the project already depends on the v1 package `@modelcontextprotocol/sdk`, use the [v1 guide](./node_mcp_server.md) or migrate first (see [Migrating a v1 Server](#migrating-a-v1-server)).
+This guide covers building MCP servers with **v2 of the MCP TypeScript SDK** (`@modelcontextprotocol/server`), the current stable release. If the project already depends on the legacy v1 package `@modelcontextprotocol/sdk`, consult the upstream v1 README (`https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/v1.x/README.md`) or migrate first (see [Migrating a v1 Server](#migrating-a-v1-server)).
 
 Code patterns are adapted from the [MCP TypeScript SDK examples](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/examples). The full v2 documentation index is `https://ts.sdk.modelcontextprotocol.io/v2/llms.txt`; every page is also served as markdown at its `.md` URL.
 

@@ -41,7 +41,7 @@ ASK BEFORE EVERY CHANGE:
 Simplification means making code more consistent with the codebase, not imposing external preferences. Before simplifying:
 
 ```
-1. Read CLAUDE.md / project conventions
+1. Read GEMINI.md / repository conventions
 2. Study how neighboring code handles similar patterns
 3. Match the project's style for:
    - Import ordering and module system
@@ -289,6 +289,12 @@ function UserBadge({ user }: Props) {
 // This is a judgment call — flag it, don't auto-refactor.
 ```
 
+### Systems & Backend (Go / Java / C++)
+
+- **Go:** Flatten `if err := ...; err != nil` early returns; do not replace explicit `error` returns or context cancellation checks with helper wrappers that hide control flow.
+- **Java:** Replace boilerplate getter/setter DTO classes with `record` types and nested loops/null checks with clear early returns or single-pass maps, but never force multi-stage `Stream` pipelines when a 5-line `for` loop is clearer or hot-path allocation matters.
+- **C / C++:** Simplify manual resource cleanup using RAII (`std::unique_lock`, `std::unique_ptr`, `std::span`) and structured bindings; never merge lifetime scopes or remove `const`/bounds checks for brevity.
+
 ## Common Rationalizations
 
 | Rationalization | Reality |
@@ -320,7 +326,7 @@ After completing a simplification pass:
 - [ ] Linter/formatter passes (no style regressions)
 - [ ] Each simplification is a reviewable, incremental change
 - [ ] The diff is clean — no unrelated changes mixed in
-- [ ] Simplified code follows project conventions (checked against CLAUDE.md or equivalent)
+- [ ] Simplified code follows project conventions (checked against GEMINI.md or equivalent)
 - [ ] No error handling was removed or weakened
 - [ ] No dead code was left behind (unused imports, unreachable branches)
 - [ ] A teammate or review agent would approve the change as a net improvement

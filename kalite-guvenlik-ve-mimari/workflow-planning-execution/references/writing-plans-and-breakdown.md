@@ -6,6 +6,7 @@ Write plans concrete enough that a fresh subagent or developer with zero prior c
 
 ## Step 1: Map Real Targets Before Planning
 
+0. **Route skills from index only:** Scan available skill names and short summaries *without* reading full `SKILL.md` / `references/*.md` files during planning; assign relevant skills explicitly to each plan phase/task and defer reading targeted skill content until execution.
 1. **Consult `.repo-map.md` first** (`token-and-context-ops` (`references/repo-map-guide.md`)) and read only the target line ranges of files to be modified (`read_file` with `StartLine`/`EndLine`).
 2. **Verify every file path, symbol name, test runner command, and helper** from actual files — never invent paths or APIs from memory.
 3. **Define clean module boundaries:** Prefer small, single-purpose files/functions with shallow nesting rather than adding complexity to unrelated files.

@@ -47,3 +47,11 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 }
 ```
+
+---
+
+## 3. Core Java Concurrency & Resource Discipline
+- **Algebraic Modeling & Immutability:** Model closed variants with `sealed interface` + pattern-matching `switch`; copy incoming mutable collections at domain seams (`List.copyOf`, `Map.copyOf`).
+- **Deterministic Resource & Pool Lifetimes:** Wrap all `AutoCloseable` streams, JDBC connections, and clients in `try-with-resources`; bound HikariCP / HTTP pools explicitly and set connect/read timeouts.
+- **Concurrency Safety:** Avoid `synchronized` around I/O (virtual-thread carrier pinning); prefer `ReentrantLock`, bounded `ExecutorService`, `ConcurrentHashMap`, or `LongAdder`, and clear `ThreadLocal` / MDC context when using pooled threads.
+

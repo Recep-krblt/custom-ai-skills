@@ -918,7 +918,100 @@ def parse_sql_symbols(lines):
     return symbols
 
 
-def parse_go_symbols(lines, line_offset=0):
+def _extract_call_signature(lines, start_idx, open_paren_col, lang='go', max_lines=3, max_param_len=56, max_ret_len=28):
+    """Extract compact single-line '(params) ret' suffix from a declaration header."""
+    if start_idx < 0 or start_idx >= len(lines) or open_paren_col < 0:
+        return ''
+    line0 = lines[start_idx]
+    if open_paren_col >= len(line0) or line0[open_paren_col] != '(':
+        return ''
+
+    depth = 0
+    in_quote = None
+    escaped = False
+    params_chars = []
+    tail_buf = []
+    closed_at_tail = False
+    limit = min(len(lines), start_idx + max_lines)
+
+    for r in range(start_idx, limit):
+        raw = lines[r]
+        c_start = open_paren_col if r == start_idx else 0
+        for c in range(c_start, len(raw)):
+            ch = raw[c]
+            if closed_at_tail:
+                tail_buf.append(ch)
+                continue
+            if escaped:
+                escaped = False
+                if depth > 0:
+                    params_chars.append(ch)
+                continue
+            if ch == '\\' and in_quote in {'"', "'"}:
+                escaped = True
+                if depth > 0:
+                    params_chars.append(ch)
+                continue
+            if in_quote:
+                if ch == in_quote:
+                    in_quote = None
+                if depth > 0:
+                    params_chars.append(ch)
+                continue
+            if ch in {'"', "'", '`'}:
+                in_quote = ch
+                if depth > 0:
+                    params_chars.append(ch)
+                continue
+            if ch == '(':
+                depth += 1
+                if depth > 1:
+                    params_chars.append(ch)
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    closed_at_tail = True
+                elif depth > 0:
+                    params_chars.append(ch)
+            elif depth > 0:
+                params_chars.append(ch)
+        if closed_at_tail and ('{' in ''.join(tail_buf) or '=>' in ''.join(tail_buf) or (lang == 'py' and ':' in ''.join(tail_buf))):
+            break
+
+    if not closed_at_tail:
+        return '(...)'
+
+    params = re.sub(r'\s+', ' ', ''.join(params_chars)).strip()
+    if len(params) > max_param_len:
+        params = params[:max_param_len - 3].rstrip() + '...'
+
+    tail = re.sub(r'\s+', ' ', ''.join(tail_buf)).strip()
+    if lang == 'py':
+        tail = tail.split(':', 1)[0].strip()
+    elif lang == 'rs':
+        tail = re.split(r'\{|\bwhere\b', tail, 1)[0].strip()
+    elif lang == 'js':
+        if '=>' in tail:
+            tail = tail.split('=>', 1)[0].strip()
+        elif '{' in tail:
+            tail = tail.split('{', 1)[0].strip()
+    else:
+        tail = tail.split('{', 1)[0].strip()
+
+    ret = ''
+    if tail and lang in {'go', 'py', 'rs', 'js'}:
+        if lang == 'js' and not tail.startswith(':'):
+            ret = ''
+        else:
+            ret = tail
+            if len(ret) > max_ret_len:
+                ret = ret[:max_ret_len - 3].rstrip() + '...'
+
+    sep = '' if (lang == 'js' and ret.startswith(':')) else ' '
+    return f'({params})' + (f'{sep}{ret}' if ret else '')
+
+
+def parse_go_symbols(lines, line_offset=0, include_signatures=False):
     symbols = []
     fn_re = re.compile(r'^\s*func\s+(?:\(([^)]+)\)\s+)?([a-zA-Z0-9_]+)(?:\[[^\]]+\])?\s*\(')
     type_re = re.compile(r'^\s*type\s+([a-zA-Z0-9_]+)(?:\[[^\]]+\])?\s+(struct|interface)\b')
@@ -979,12 +1072,13 @@ def parse_go_symbols(lines, line_offset=0):
             if recv_raw:
                 recv_type = recv_raw.strip().split()[-1].lstrip('*')
                 recv_type = re.sub(r'\[.*\]$', '', recv_type)
-                label = f'func ({recv_type}) {fn_name}'
+                base_label = f'func ({recv_type}) {fn_name}'
             else:
-                label = f'func {fn_name}'
+                base_label = f'func {fn_name}'
+            sig = _extract_call_signature(lines, idx - 1, fm.end() - 1, lang='go') if include_signatures else ''
             end_line = find_brace_block_end(lines, idx - 1, is_go=True)
             end_abs = (end_line + line_offset) if end_line else None
-            symbols.append(format_symbol(label, idx + line_offset, end_abs))
+            symbols.append(format_symbol(f'{base_label}{sig}', idx + line_offset, end_abs))
             continue
 
         # Check Go 1.22+ mux.Handle / HandleFunc routes outside string literals
@@ -1005,16 +1099,16 @@ def parse_go_symbols(lines, line_offset=0):
     return symbols
 
 
-def parse_code_symbols(lines, ext, line_offset=0):
+def parse_code_symbols(lines, ext, line_offset=0, include_signatures=False):
     if ext == '.go':
-        return parse_go_symbols(lines, line_offset=line_offset)
+        return parse_go_symbols(lines, line_offset=line_offset, include_signatures=include_signatures)
 
     symbols = []
 
     # Python
     if ext == '.py':
         cls_def = re.compile(r'^\s*(class\s+[a-zA-Z0-9_]+(?:\([^)]*\))?):')
-        fn_def = re.compile(r'^\s*((?:async\s+)?def\s+[a-zA-Z0-9_]+\s*\([^)]*\))(?:\s*->\s*[^:]+)?:')
+        fn_def = re.compile(r'^\s*((?:async\s+)?def\s+[a-zA-Z0-9_]+\s*\([^)]*\))(?:\s*->\s*([^:]+))?:')
         fn_multi_def = re.compile(r'^\s*((?:async\s+)?def\s+[a-zA-Z0-9_]+)\s*\(')
         route_def = re.compile(r'^\s*(@(?:app|router|blueprint)\.(?:get|post|put|delete|patch|route)\([^)]*\))')
 
@@ -1036,7 +1130,17 @@ def parse_code_symbols(lines, ext, line_offset=0):
             if f_match:
                 end_line = find_python_block_end(lines, idx - 1)
                 end_abs = (end_line + line_offset) if end_line else None
-                label = f_match.group(1) if f_match.re is fn_def else f'{f_match.group(1)}(...)'
+                if f_match.re is fn_def:
+                    label = f_match.group(1)
+                    if include_signatures and f_match.group(2):
+                        ret = re.sub(r'\s+', ' ', f_match.group(2)).strip()
+                        label = f'{label} -> {ret[:24]}'
+                else:
+                    if include_signatures:
+                        sig = _extract_call_signature(lines, idx - 1, f_match.end() - 1, lang='py')
+                        label = f'{f_match.group(1)}{sig}'
+                    else:
+                        label = f'{f_match.group(1)}(...)'
                 symbols.append(format_symbol(label, idx + line_offset, end_abs))
 
     # JavaScript / TypeScript / JSX / TSX
@@ -1047,8 +1151,8 @@ def parse_code_symbols(lines, ext, line_offset=0):
             ('type', re.compile(r'^\s*(?:export\s+)?type\s+([a-zA-Z0-9_]+)\s*=')),
             ('fn', re.compile(r'^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(')),
             ('arrow_paren', re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?\(')),
-            ('fn', re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?[a-zA-Z0-9_]+\s*=>')),
-            ('fn', re.compile(r'^\s*((?:window|globalThis|exports|module\.exports)\.[a-zA-Z0-9_]+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)')),
+            ('fn_arrow_id', re.compile(r'^\s*(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?([a-zA-Z0-9_]+)\s*=>')),
+            ('fn_assign', re.compile(r'^\s*((?:window|globalThis|exports|module\.exports)\.[a-zA-Z0-9_]+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)')),
             ('route', re.compile(r'^\s*(?:router|app)\.(get|post|put|delete|patch|use)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]')),
         ]
         in_block_comment = False
@@ -1075,7 +1179,17 @@ def parse_code_symbols(lines, ext, line_offset=0):
                     break
                 end_line = find_brace_block_end(lines, idx - 1, is_js=True)
                 end_abs = (end_line + line_offset) if end_line else None
-                label = f'{kind} {m.group(1)}' if kind in {'class', 'interface', 'type'} else f'fn {m.group(1)}()'
+                if kind in {'class', 'interface', 'type'}:
+                    label = f'{kind} {m.group(1)}'
+                elif include_signatures:
+                    if kind == 'fn_arrow_id':
+                        sig = f'({m.group(2)})'
+                    else:
+                        paren_pos = line.find('(', m.end() - 1 if kind in {'fn', 'arrow_paren'} else m.start())
+                        sig = _extract_call_signature(lines, idx - 1, paren_pos, lang='js') if paren_pos >= 0 else '()'
+                    label = f'fn {m.group(1)}{sig or "()"}'
+                else:
+                    label = f'fn {m.group(1)}()'
                 symbols.append(format_symbol(label, idx + line_offset, end_abs))
                 break
 
@@ -1090,7 +1204,12 @@ def parse_code_symbols(lines, ext, line_offset=0):
             if m:
                 end_line = find_brace_block_end(lines, idx - 1)
                 end_abs = (end_line + line_offset) if end_line else None
-                symbols.append(format_symbol(f'{m.group(1)} {m.group(2)}', idx + line_offset, end_abs))
+                sig = ''
+                if include_signatures and m.group(1) == 'fn':
+                    paren_pos = line.find('(', m.end())
+                    if paren_pos >= 0:
+                        sig = _extract_call_signature(lines, idx - 1, paren_pos, lang='rs')
+                symbols.append(format_symbol(f'{m.group(1)} {m.group(2)}{sig}', idx + line_offset, end_abs))
 
     elif ext in {'.ps1', '.psm1'}:
         ps_re = re.compile(r'^\s*(function|filter|class)\s+([a-zA-Z0-9_\-]+)', re.IGNORECASE)
@@ -1121,7 +1240,8 @@ def parse_code_symbols(lines, ext, line_offset=0):
                 if pm:
                     end_line = find_brace_block_end(lines, idx - 1, line_comments=comments)
                     end_abs = (end_line + line_offset) if end_line else None
-                    symbols.append(format_symbol(f'function {pm.group(1)}', idx + line_offset, end_abs))
+                    sig = _extract_call_signature(lines, idx - 1, pm.end() - 1, lang='c') if include_signatures else ''
+                    symbols.append(format_symbol(f'function {pm.group(1)}{sig}', idx + line_offset, end_abs))
                     continue
 
             cm = cls_p.match(line)
@@ -1134,7 +1254,11 @@ def parse_code_symbols(lines, ext, line_offset=0):
             if fm and fm.group(1) not in {'if', 'for', 'while', 'switch', 'catch'}:
                 end_line = find_brace_block_end(lines, idx - 1, line_comments=comments)
                 end_abs = (end_line + line_offset) if end_line else None
-                symbols.append(format_symbol(f'method {fm.group(1)}()', idx + line_offset, end_abs))
+                sig = '()'
+                if include_signatures:
+                    paren_pos = line.find('(', fm.start(1))
+                    sig = _extract_call_signature(lines, idx - 1, paren_pos, lang='c') if paren_pos >= 0 else '()'
+                symbols.append(format_symbol(f'method {fm.group(1)}{sig}', idx + line_offset, end_abs))
 
     return symbols
 
@@ -1349,7 +1473,7 @@ def iter_project_files(root_path: Path, gitignore_patterns: list):
             yield rel_file_path, Path(dirpath) / fname, fname, ext
 
 
-def parse_file_content(lines, fname, ext, go_module=None):
+def parse_file_content(lines, fname, ext, go_module=None, include_signatures=False):
     """Parse symbols and cross-file refs for a single file."""
     symbols = []
     lower_name = fname.lower()
@@ -1357,10 +1481,13 @@ def parse_file_content(lines, fname, ext, go_module=None):
     if ext in {'.html', '.htm'}:
         symbols = parse_html_symbols(lines)
         for block_offset, block_lines in extract_inline_script_blocks(lines):
-            symbols.extend(parse_code_symbols(block_lines, '.js', line_offset=block_offset))
+            symbols.extend(parse_code_symbols(block_lines, '.js', line_offset=block_offset, include_signatures=include_signatures))
         symbols = sort_symbols_by_line(symbols)
     elif ext in {'.astro', '.svelte', '.vue'}:
-        symbols = sort_symbols_by_line(parse_code_symbols(lines, '.ts') + parse_html_symbols(lines, skip_frontmatter=(ext == '.astro')))
+        symbols = sort_symbols_by_line(
+            parse_code_symbols(lines, '.ts', include_signatures=include_signatures)
+            + parse_html_symbols(lines, skip_frontmatter=(ext == '.astro'))
+        )
     elif ext in {'.css', '.scss', '.sass'}:
         symbols = parse_css_symbols(lines)
     elif ext in {'.md', '.mdx'}:
@@ -1376,7 +1503,7 @@ def parse_file_content(lines, fname, ext, go_module=None):
     elif lower_name.startswith('dockerfile') or ext == '.dockerfile':
         symbols = parse_dockerfile_symbols(lines)
     elif ext in {'.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.java', '.cs', '.go', '.php', '.c', '.cpp', '.h', '.hpp', '.rs', '.ps1', '.psm1'}:
-        symbols = parse_code_symbols(lines, ext)
+        symbols = parse_code_symbols(lines, ext, include_signatures=include_signatures)
 
     refs = extract_file_refs(lines, ext, fname=fname, go_module=go_module)
     return symbols, refs
@@ -1406,7 +1533,7 @@ def get_project_file_snapshot(root_path: Path, gitignore_patterns: list):
     return snapshot
 
 
-def scan_project(root_dir: str, cached_files=None):
+def scan_project(root_dir: str, cached_files=None, include_signatures=False):
     root_path = Path(root_dir).resolve()
     gitignore_patterns = load_gitignore(root_path)
     go_module = _read_go_module_name(root_path)
@@ -1440,7 +1567,9 @@ def scan_project(root_dir: str, cached_files=None):
             except Exception:
                 continue
             line_count = len(lines)
-            symbols, refs = parse_file_content(lines, fname, ext, go_module=go_module)
+            symbols, refs = parse_file_content(
+                lines, fname, ext, go_module=go_module, include_signatures=include_signatures
+            )
             reparsed_count += 1
 
         entry = {
@@ -1587,6 +1716,119 @@ def search_symbols(file_entries, query, scope=None, use_regex=False):
     return matches
 
 
+CALLER_CODE_EXTS = {
+    '.go', '.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+    '.html', '.htm', '.astro', '.svelte', '.vue', '.rs', '.java',
+    '.cs', '.php', '.c', '.cpp', '.h', '.hpp', '.ps1', '.psm1', '.sql',
+}
+
+
+def _parse_symbol_spans(symbols):
+    spans = []
+    for s in symbols:
+        m = _SYMBOL_LINE_RE.search(s)
+        if not m:
+            continue
+        start_l = int(m.group(1))
+        end_l = int(m.group(2)) if m.group(2) else start_l
+        name_part = _SYMBOL_LINE_RE.sub('', s).strip()
+        spans.append((start_l, end_l, name_part))
+    return spans
+
+
+def _enclosing_symbol(spans, lineno):
+    best = None
+    best_len = None
+    for start_l, end_l, name_part in spans:
+        if start_l <= lineno <= end_l:
+            span_len = end_l - start_l
+            if best is None or span_len < best_len:
+                best = name_part
+                best_len = span_len
+    return best
+
+
+def find_callers(root_path: Path, file_entries, query, scope=None, use_regex=False, max_per_file=15):
+    """Trace symbol definitions and cross-file call/reference sites with enclosing context."""
+    scoped = _filter_by_scope(file_entries, scope)
+    if use_regex:
+        try:
+            pattern = re.compile(query)
+        except re.error as exc:
+            print(f"[RepoMap] Invalid regex '{query}': {exc}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        terms = [t.strip() for t in query.split('|') if t.strip()]
+        if not terms:
+            return []
+        joined = '|'.join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+        pattern = re.compile(rf'(?<![a-zA-Z0-9_])(?:{joined})(?![a-zA-Z0-9_])')
+
+    results = []
+    for entry in scoped:
+        rel_p = entry['path']
+        ext = os.path.splitext(rel_p)[1].lower()
+        if ext not in CALLER_CODE_EXTS:
+            continue
+        full_p = root_path / rel_p
+        try:
+            with open(full_p, 'r', encoding='utf-8-sig', errors='replace') as f:
+                lines = f.readlines()
+        except Exception:
+            continue
+
+        spans = _parse_symbol_spans(entry['symbols'])
+        def_lines = {st: nm for st, _, nm in spans if pattern.search(nm)}
+        hash_comment = ext in {'.py', '.ps1', '.psm1', '.php'}
+        slash_comment = ext in {'.go', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.rs', '.java', '.cs', '.php', '.c', '.cpp', '.h', '.hpp'}
+        in_block_comment = False
+
+        hits = []
+        for idx, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            if ext in {'.html', '.htm', '.astro', '.svelte', '.vue'}:
+                clean, in_block_comment = _strip_html_comments_line(raw, in_block_comment)
+            else:
+                if in_block_comment:
+                    if '*/' in stripped:
+                        in_block_comment = False
+                    continue
+                if stripped.startswith('/*') and '*/' not in stripped[2:]:
+                    in_block_comment = True
+                    continue
+                clean = raw
+                if slash_comment and stripped.startswith('//'):
+                    continue
+                if hash_comment and stripped.startswith('#'):
+                    continue
+                if ext == '.sql' and stripped.startswith('--'):
+                    continue
+                if slash_comment and '//' in clean:
+                    clean = clean.split('//', 1)[0]
+
+            if not pattern.search(clean):
+                continue
+
+            snippet = re.sub(r'\s+', ' ', stripped)[:110]
+            if idx in def_lines:
+                tag = '[def]'
+            else:
+                enc = _enclosing_symbol(spans, idx)
+                tag = f'[in {enc}]' if enc else '[top]'
+            hits.append((idx, tag, snippet))
+
+        if hits:
+            truncated = 0
+            if max_per_file > 0 and len(hits) > max_per_file:
+                truncated = len(hits) - max_per_file
+                hits = hits[:max_per_file]
+            results.append((rel_p, hits, truncated))
+
+    return results
+
+
 def get_git_changed_paths(root_path: Path):
     try:
         res = subprocess.run(
@@ -1727,10 +1969,12 @@ def main():
     parser.add_argument("--output", "-o", default=".repo-map.md", help="Output markdown file path (relative to root)")
     parser.add_argument("--check", action="store_true", help="Only check if map is stale without regenerating")
     parser.add_argument("--find", "-f", help="Instant symbol/path search across project (supports '|' OR queries)")
+    parser.add_argument("--callers", "-c", help="Trace definitions & call/reference sites of symbol(s) across project (supports '|')")
     parser.add_argument("--in", "-i", dest="scope", help="Filter output/search to paths containing substring")
-    parser.add_argument("--regex", "-E", action="store_true", help="Treat --find query as a Python regular expression")
+    parser.add_argument("--regex", "-E", action="store_true", help="Treat --find / --callers query as a Python regular expression")
     parser.add_argument("--changed", action="store_true", help="Print map symbols only for git-changed (or HEAD) files")
     parser.add_argument("--stats", action="store_true", help="Print project LOC/symbol hotspot statistics")
+    parser.add_argument("--signatures", "-S", action="store_true", help="Include compact function/method parameter & return signatures")
     parser.add_argument("--compact", action="store_true", help="Summarize test files and CSS selectors for smaller maps")
     parser.add_argument("--no-wiring", action="store_true", help="Omit the Cross-References & Wiring section")
     parser.add_argument("--max-symbols", type=int, default=60, help="Max symbols per file in .repo-map.md (0 = unlimited; --find searches all symbols)")
@@ -1750,46 +1994,69 @@ def main():
     gitignore_patterns = load_gitignore(target_dir)
 
     cached_data = load_cache(cache_file)
-    cached_files = cached_data['files'] if cached_data else {}
+    cached_opts = cached_data.get('options') if isinstance(cached_data, dict) else None
+    read_only_mode = bool(args.find or args.callers or args.changed or args.stats)
+    has_explicit_render_flag = bool(args.compact or args.no_wiring or args.signatures or args.max_symbols != 60 or args.scope)
+    raw_cached_files = cached_data['files'] if cached_data else {}
     current_snapshot = get_project_file_snapshot(target_dir, gitignore_patterns)
     cached_snapshot = (
-        {p: {'mtime': v.get('mtime'), 'size': v.get('size')} for p, v in cached_files.items()}
+        {p: {'mtime': v.get('mtime'), 'size': v.get('size')} for p, v in raw_cached_files.items()}
         if cached_data else None
     )
     files_fresh = out_file.exists() and (cached_snapshot == current_snapshot)
     render_opts = {
         'compact': args.compact,
         'no_wiring': args.no_wiring,
+        'signatures': args.signatures,
         'max_symbols': args.max_symbols,
         'scope': args.scope or '',
     }
-    read_only_mode = bool(args.find or args.changed or args.stats)
-    has_explicit_render_flag = bool(args.compact or args.no_wiring or args.max_symbols != 60 or args.scope)
 
     if args.check:
         opts_ok = True
         if has_explicit_render_flag:
-            cached_opts = cached_data.get('options') if isinstance(cached_data, dict) else None
             opts_ok = (cached_opts == render_opts)
         is_up_to_date = files_fresh and opts_ok
         status_msg = "UP_TO_DATE" if is_up_to_date else "STALE"
         print(f"[RepoMap] Status: {status_msg}")
         sys.exit(0 if is_up_to_date else 2)
 
+    sig_mismatch = (not args.callers) and bool(cached_opts) and (cached_opts.get('signatures', False) != args.signatures)
+    cached_files = {} if sig_mismatch else raw_cached_files
+
     if args.scope and not read_only_mode and args.output == ".repo-map.md":
-        print("[RepoMap] Error: --in cannot overwrite root .repo-map.md; pass --output <file> or use with --find/--changed/--stats.", file=sys.stderr)
+        print("[RepoMap] Error: --in cannot overwrite root .repo-map.md; pass --output <file> or use with --find/--callers/--changed/--stats.", file=sys.stderr)
         sys.exit(1)
 
-    is_fresh = files_fresh and (cached_data.get('options') == render_opts if cached_data else False)
+    is_fresh = files_fresh and (cached_opts == render_opts if cached_opts else False)
 
     if is_fresh and not read_only_mode:
         print(f"[RepoMap] Map is already fresh (0 changes detected). Output: {out_file}")
         sys.exit(0)
 
-    entries, new_cache_files, reparsed = scan_project(str(target_dir), cached_files=cached_files)
+    entries, new_cache_files, reparsed = scan_project(
+        str(target_dir), cached_files=cached_files, include_signatures=args.signatures
+    )
 
     if args.stats:
         print_stats(_filter_by_scope(entries, args.scope), out_file)
+        sys.exit(0)
+
+    if args.callers:
+        per_file_cap = 0 if args.max_symbols == 0 else 15
+        caller_results = find_callers(
+            target_dir, entries, args.callers, scope=args.scope, use_regex=args.regex, max_per_file=per_file_cap
+        )
+        total_hits = sum(len(h) + trunc for _, h, trunc in caller_results)
+        print(f"[RepoMap] Callers / References for '{args.callers}' ({total_hits} hits in {len(caller_results)} files):")
+        if not caller_results:
+            print("  No definitions or references matched.")
+        for path, hits, trunc in caller_results:
+            print(f"  * {path}")
+            for lineno, tag, snippet in hits:
+                print(f"      - L{lineno} {tag}: {snippet}")
+            if trunc:
+                print(f"      - ... (+{trunc} more in file; pass --max-symbols 0 for all)")
         sys.exit(0)
 
     if args.changed:

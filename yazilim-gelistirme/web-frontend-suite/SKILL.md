@@ -13,3 +13,5 @@ Load only the reference matching your frontend layer:
 | Astro SSG/SSR, `.astro` Islands Architecture, Content Collections | [references/astro-framework.md](references/astro-framework.md) | Zero-JS default + selective `client:*` |
 | Typography, palette, motion & anti-template visual direction | [references/frontend-design-aesthetics.md](references/frontend-design-aesthetics.md) | 2-pass brief-driven design plan |
 | Automated Playwright testing on local servers (vs `browser` / DevTools) | [references/playwright-webapp-testing.md](references/playwright-webapp-testing.md) | Helper: [scripts/with_server.py](scripts/with_server.py) & `examples/` |
+
+> **Role Boundary:** For admin dashboards or existing-UI overhauls, defer aesthetics to `reference-design-contract` / workspace `impeccable` (`Operate` mode) rather than landing-page styling; pair Playwright flows with `chrome-devtools-plugin` (`a11y-debugging` / LCP) for live DOM audits.

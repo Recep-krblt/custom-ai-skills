@@ -13,3 +13,4 @@ Load only the specific protocol guide needed for your document workflow:
 | Word (`.docx`) OpenXML schema, row cloning, metadata hygiene & Word COM check | [references/docx-openxml-standards.md](references/docx-openxml-standards.md) | `NO SILENT ROW TRUNCATION` & hanging indent |
 | PDF reading, merging, splitting, form filling & visual page verification | [references/pdf-processing.md](references/pdf-processing.md) | Also: [pdf-forms.md](references/pdf-forms.md), [pdf-reference.md](references/pdf-reference.md), `scripts/*.py` |
 | Architecture Decision Records (ADRs), API docs & documentation drift audit | [references/documentation-and-adrs.md](references/documentation-and-adrs.md) | ADR template, JSDoc/OpenAPI & changelog rules |
+| Formal Turkish prose, anti-translationese & epistemic claim guard | Cross-skill: `dogal-turkce-metin-ustasi` | Use `academic-epistemic-rules.md` + `Academic` row (no student voice) |

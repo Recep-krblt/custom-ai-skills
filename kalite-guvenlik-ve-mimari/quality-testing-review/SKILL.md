@@ -15,3 +15,5 @@ Select the required engineering gate before editing or reporting results:
 | PR diff audit, OWASP/perf severity review (`P0`–`P3`) | [references/code-review-and-checklist.md](references/code-review-and-checklist.md) | Read-only review; [checklist](references/review-checklist.md) |
 | Clean up nested/heavy working code safely | [references/code-simplification.md](references/code-simplification.md) | Preserve exact behavior; Chesterton's Fence |
 | Adversarial cross-exam on high-stakes decisions | [references/doubt-driven-development.md](references/doubt-driven-development.md) | Fresh-context `invoke_subagent` (`ARTIFACT` + `CONTRACT`) |
+
+> **Cross-Skill Contract:** Prune single-line test/diff runs with `rtk` (`token-and-context-ops`), escalate auth/IDOR/CSP/SSRF/secret findings to `cyber-security-analyst`, and prefer `chrome-devtools-plugin` for live browser heap snapshots.

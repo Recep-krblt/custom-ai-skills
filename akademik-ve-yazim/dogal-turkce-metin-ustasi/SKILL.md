@@ -11,3 +11,5 @@ Eliminate robotic translationese in all Turkish outputs (always preserve Turkish
 | :--- | :--- | :--- |
 | Student homework, lab reports, code reviews, technical advice | [references/anti-translationese-and-tone.md](references/anti-translationese-and-tone.md) | AI cliché & parenthesis bans, student voice, pre-verb emphasis & 4-context tone matrix |
 | Academic writing, paper summaries & TÜBİTAK 2209 proposals | [references/academic-epistemic-rules.md](references/academic-epistemic-rules.md) | 5 epistemic caution rules, claim-to-source separation & pre-delivery checklist |
+
+> **Register Guard:** Keep formal passive academic Turkish (`academic-epistemic-rules.md` + `Academic / TÜBİTAK 2209` tone row) for grant/research writing; apply `Student Voice` solely to student homework and lab sheets.

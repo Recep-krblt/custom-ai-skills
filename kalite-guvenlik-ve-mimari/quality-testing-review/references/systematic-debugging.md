@@ -58,5 +58,6 @@ Complete each phase before moving to the next.
 ## Antigravity Execution Notes
 
 - Read failing logs economically with PowerShell filtering (`Select-String`, `-Tail 80`) per token efficiency rules.
+- **Session / Agent Execution Postmortem:** When debugging why an agent stalled, repeated work, or skipped a plan, read session logs/transcripts strictly read-only (`Select-String` / bounded ranges) and cite exact `path:line` evidence — no citation, no finding; never fabricate token counts or cost numbers.
 - For complex multi-subsystem failures (e.g., 3+ failing test suites with distinct errors), dispatch parallel `research` subagents or use `workflow-planning-execution` (`references/parallel-agents.md`) after isolating independent failure domains.
 - Never claim a bug is "fixed" without running the exact failing command after the last edit (`quality-testing-review` (`references/verification-before-completion.md`)).

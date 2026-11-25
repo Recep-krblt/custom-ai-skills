@@ -3,27 +3,23 @@
 Turn ambiguous ideas into validated, minimal designs **before** touching implementation files.
 
 **Hard Gate:**
-Do NOT write application code, scaffold files, or run destructive commands until you understand the existing codebase, clarify ambiguous requirements with the user, and align on an approach.
+Do NOT write application code, scaffold files, or run build-out scripts until you understand the existing codebase, clarify ambiguous requirements with the user, and align on an approach.
 
 ## Checklist
 
-1. **Explore context first:**
-   - Read `.repo-map.md` (or run `token-and-context-ops` (`references/repo-map-guide.md`) first) and check key config/manifest files (`package.json`, `pyproject.toml`, `GEMINI.md`, recent `git log -n 5`) to learn existing stack, conventions, and helpers.
-2. **Assess clarity & decompose:**
-   - If requirements have unstated constraints, tradeoffs, or multiple valid interpretations, ask focused questions **one concern at a time** (use `ask_question` with crisp options and a `(Recommended)` default when choices are bounded; use plain text for open-ended questions).
-   - If the request bundles multiple independent subsystems, help the user scope MVP first before designing everything at once.
-3. **Propose 2–3 concrete approaches:**
-   - Compare each option briefly (complexity, reuse of existing code, tradeoffs) and state your **recommended** option clearly.
-   - Apply **YAGNI** ruthlessly: cut speculative abstractions, unnecessary config layers, and features nobody asked for.
-4. **Present the design cleanly:**
-   - Break larger designs into short sections (Architecture/Data Flow, Components & File Boundaries, Error Handling, Testing Strategy) proportional to task complexity — a small feature needs 1–2 concise sections, not a 10-page doc.
-   - Optionally validate design coherence using a fresh `research` subagent guided by [builder-check-prompt.md](builder-check-prompt.md) (adapted for reviewer/alignment inspection) when stakes are high.
-5. **Save or hand off to implementation planning:**
-   - Only persist a spec markdown doc if the user wants a recorded spec (write inside workspace `docs/specs/` or conversation artifacts if requested) — avoid creating unwanted clutter files for small tasks.
-   - Once the user approves the design, transition cleanly to `workflow-planning-execution` (`references/writing-plans-and-breakdown.md`) (for multi-step/multi-file builds) or direct implementation for small single-file tasks.
-
-## Antigravity Alignment Rules
-
-- Respect existing repo patterns and helpers (`code_quality` guideline): prefer extending existing abstractions over inventing parallel frameworks.
-- Keep questions short and technical; do not interrogate users with 6 unrelated questions in one block when 1–2 targeted questions clarify everything.
-- When `workflow-planning-execution` (`references/brainstorming.md`) finishes on a clear, small task ("rename button", "fix typo", "add this exact CLI flag"), do not force bureaucracy — confirm briefly if ambiguous, or move straight to execution.
+1. **Recon existing code first:**
+   - Read `.repo-map.md` (`token-and-context-ops`), key manifests (`package.json`, `pyproject.toml`, `GEMINI.md`), and recent `git log -n 5` before asking questions — never ask what the codebase or user prompt already answers.
+2. **Why first & zero-filler questions (`v7.0.2` discipline):**
+   - Ask a question **only** when the answer changes what gets built and nothing in context already settles it. Never ask about process mechanics (where docs live, whether to read another file); decide and state it.
+   - If the user has not stated **why** they want the feature/system, ask one open question in plain language with **no predefined options** so you don't bias their goal.
+   - Once intent is clear and a decision has concrete trade-offs, present 2–3 focused approaches (or `ask_question`) with pros/cons and mark your `(Recommended)` pick.
+3. **State defaults out loud & offer fast opt-out:**
+   - Any platform, language, library, or UX default you fill in must be stated explicitly as **your proposal** so the user can override it before build.
+   - Apply **YAGNI** ruthlessly: cut speculative config layers, extra wrappers, and unrequested features.
+   - If the prompt is already concrete with one obvious implementation path (e.g., `"rename button"`, `"add this CLI flag"`), summarize the concise short design + proposed defaults in one block with an opt-out (*"Or say 'just build it' and I'll proceed"*) instead of forcing multi-round interrogation.
+4. **Present proportional design & optionally cross-check:**
+   - Match length to scope (1–2 tight blocks for small changes; short Architecture/Flow, Seams/Files, Error Handling, Testing sections for larger builds).
+   - For high-stakes multi-module projects, optionally run a fresh `research` subagent with [builder-check-prompt.md](builder-check-prompt.md) before finalizing.
+5. **Save only when helpful & transition to planning:**
+   - Avoid writing clutter design docs for trivial tasks; persist to `docs/specs/` (or conversation artifacts) only when the design warrants a durable record.
+   - Once approved, hand off to `workflow-planning-execution` (`references/writing-plans-and-breakdown.md`) or direct execution for single-file edits.

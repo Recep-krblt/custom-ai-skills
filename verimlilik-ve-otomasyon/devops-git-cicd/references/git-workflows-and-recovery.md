@@ -45,17 +45,16 @@ git merge --abort
 
 ## 4. Isolated `git worktree` & Branch Completion Gate
 - **Conflict & Secret Hygiene:** Inspect both sides of merge conflicts carefully and verify `.gitignore` excludes `.env`, credentials, and build artifacts before staging.
-- **Worktree Workflow:**
+- **Worktree Setup:**
   ```powershell
-  # 1. Ensure .worktrees is ignored by git
   git check-ignore -q .worktrees
-
-  # 2. Create an isolated worktree and feature branch
   git worktree add .worktrees/feat-x -b feat/x
-
-  # 3. Verify baseline tests pass before starting work
-  # 4. Run full test suite before merging/opening a PR (verification-before-completion)
-  # 5. Remove worktree cleanly when finished
-  git worktree remove .worktrees/feat-x
   ```
+- **Branch & Worktree Completion Protocol (`finishing-a-development-branch`):**
+  1. **Verify Tests First:** Run the full project test suite; stop immediately if any test fails (never offer merge or PR over red tests).
+  2. **Detect Context & Base Branch:** Check `git rev-parse --git-dir` vs `--git-common-dir` (normal repo vs named worktree vs detached HEAD) and confirm the target base branch with the user before merging.
+  3. **Present Completion Choices:**
+     - *Normal repo / named worktree:* `1. Merge back to <base> locally`, `2. Push & open Pull Request`, `3. Keep branch as-is`. (Detached HEAD: omit local merge, offer PR from new branch or keep as-is.)
+     - Never discard branches/worktrees unprompted unless explicitly requested.
+  4. **Merge & Post-Merge Proof Gate:** On local merge, switch to main repo root, run `git merge <feature-branch>`, and **re-run the full test suite on the merged base branch** before calling `git worktree remove` or `git branch -d`.
 - Never run `git push --force` or `git reset --hard` unless explicitly requested by the user.
